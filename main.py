@@ -1,10 +1,15 @@
+import pathlib
+import uuid
 import modal 
 from pydantic import BaseModel
-from fastapi import Depends
+from fastapi import Depends, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import os
+from supabase import create_client
+import asyncio
 
 class ProcessVideoRequest(BaseModel): 
-    s3_key: str
+    video_path: str
 
 # setup environment on the server (modal)
 image = (modal.Image.from_registry(
@@ -31,24 +36,44 @@ auth_scheme = HTTPBearer()
 @app.cls(gpu="L40S", timeout=900, retries=0, scaledown_window=20, secrets=[modal.Secret.from_name("podcast-clipper-secret")], volumes={mount_path: volume})
 class PodcastClipper: 
     @modal.enter()
-    def load_model(self):
+    async def load_model(self): 
         print("loading models...")
-        pass
+        url = os.environ["SUPABASE_URL"]
+        key = os.environ["SUPABASE_KEY"]
+        self.supabase = create_client(url, key)
+        self.bucket_name = os.environ["BUCKET_NAME"]
 
     @modal.fastapi_endpoint(method="POST")
-    def process_video(self, request: ProcessVideoRequest, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
-        print("processing videos " + request.s3_key)
-        pass
+    async def process_video(self, request: ProcessVideoRequest, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
+        print("processing videos " + request.video_path)
+
+        if token.credentials != os.environ["AUTH_TOKEN"]:
+            raise HTTPException(status_code=401, detail="Invalid bearer token", headers={"WWW-Authenticate": "Bearer"})
+
+        run_id = str(uuid.uuid4())
+        base_dir = pathlib.Path("/tmp") / run_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+
+        # download video file
+        video_path = base_dir / "input.mp4"
+        with open(video_path, "wb+") as f: 
+            response = await asyncio.to_thread(
+                self.supabase.storage.from_(self.bucket_name).download,
+                request.video_path,
+            )
+            f.write(response)
+
+        print(os.listdir(base_dir))
 
 @app.local_entrypoint()
 def main(): 
     import requests 
 
     podcast_clipper = PodcastClipper()
-    url = podcast_clipper.process_video.web_url 
+    url = podcast_clipper.process_video.web_url
 
     payload = {
-        "s3_key": "test1/obrolan15min.mp4"
+        "video_path": "test1/input.mp4"
     }
 
     headers = {
