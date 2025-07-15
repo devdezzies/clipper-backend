@@ -1,4 +1,8 @@
+import json
 import pathlib
+import shutil
+import subprocess
+import time
 import uuid
 import modal 
 from pydantic import BaseModel
@@ -7,6 +11,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import os
 from supabase import create_client
 import asyncio
+import whisperx
+from google import genai
 
 class ProcessVideoRequest(BaseModel): 
     video_path: str
@@ -37,11 +43,95 @@ auth_scheme = HTTPBearer()
 class PodcastClipper: 
     @modal.enter()
     async def load_model(self): 
-        print("loading models...")
+        # setup supabase client
+        print("Creating supabase client")
         url = os.environ["SUPABASE_URL"]
         key = os.environ["SUPABASE_KEY"]
         self.supabase = create_client(url, key)
         self.bucket_name = os.environ["BUCKET_NAME"]
+
+        # load whisper model 
+        print("Loading whisper model")
+        self.whisperx_model = whisperx.load_model("large-v2", device="cuda", compute_type="float16")
+
+        self.alignment_model, self.metadata = whisperx.load_align_model(
+            language_code="en", 
+            device="cuda"
+        )
+
+        print("Transcription model loaded")
+
+        # gemini client
+        print("Creating gemini client...")
+        self.gemini_client = genai.Client(api_key=os.environ["GEMINI_SECRET"])
+        print("Created gemini client")
+
+    def transcribe_video(self, base_dir: str, video_path: str) -> str: 
+        audio_path = base_dir / "audio.wav"
+        extract_cmd = f"ffmpeg -i {video_path} -vn -acodec pcm_s16le -ar 16000 -ac 1 {audio_path}"
+        subprocess.run(extract_cmd, shell=True, check=True, capture_output=True)
+
+        print("Starting transcription with WhisperX...")
+
+        start_time = time.time()
+
+        audio = whisperx.load_audio(str(audio_path))
+        result = self.whisperx_model.transcribe(audio, batch_size=16)
+
+        result = whisperx.align(
+            result["segments"], 
+            self.alignment_model, 
+            self.metadata, 
+            audio, 
+            device="cuda", 
+            return_char_alignments=False
+        )
+
+        duration = time.time() - start_time
+        print("Transcription and alignment took " + str(duration) + " seconds")
+
+        segments = []
+
+        if "segments" in result: 
+            for word_segment in result["segments"]: 
+                segments.append({
+                    "start": word_segment["start"], 
+                    "end": word_segment["end"], 
+                    "word": word_segment["text"]
+                })
+
+        return json.dumps(segments)
+    
+    def identify_moments(self, transcript: dict): 
+        response = self.gemini_client.models.generate_content(
+            model="gemini-2.5-flash", 
+            contents="""
+     This is a podcast video transcript consisting of word, along with each words's start and end time. I am looking to create clips between a minimum of 30 and maximum of 60 seconds long. The clip should never exceed 60 seconds.
+
+    Your task is to find and extract stories, or question and their corresponding answers from the transcript.
+    Each clip should begin with the question and conclude with the answer.
+    It is acceptable for the clip to include a few additional sentences before a question if it aids in contextualizing the question.
+
+    Please adhere to the following rules:
+    - Ensure that clips do not overlap with one another.
+    - Start and end timestamps of the clips should align perfectly with the sentence boundaries in the transcript.
+    - Only use the start and end timestamps provided in the input. modifying timestamps is not allowed.
+    - Format the output as a list of JSON objects, each representing a clip with 'start' and 'end' timestamps: [{"start": seconds, "end": seconds}, ...clip2, clip3]. The output should always be readable by the python json.loads function.
+    - Aim to generate longer clips between 40-60 seconds, and ensure to include as much content from the context as viable.
+
+    Avoid including:
+    - Moments of greeting, thanking, or saying goodbye.
+    - Non-question and answer interactions.
+
+    If there are no valid clips to extract, the output should be an empty list [], in JSON format. Also readable by json.loads() in Python.
+
+    The transcript is as follows:\n\n""" + str(transcript))
+        
+        print(f"Identified moments response: {response.text}")
+        return response.text
+    
+    def process_clip(self, base_dir: str, original_video_path: str, start_time: float, end_time: float, clip_index: int, transcript_segments: list):
+        pass
 
     @modal.fastapi_endpoint(method="POST")
     async def process_video(self, request: ProcessVideoRequest, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
@@ -63,8 +153,39 @@ class PodcastClipper:
             )
             f.write(response)
 
-        print(os.listdir(base_dir))
+        # transcribe the video
+        transcript_segments_json = self.transcribe_video(base_dir, video_path)
+        transcript_segments = json.loads(transcript_segments_json)
 
+        # identify moments for clips
+        print("Identifying moments...")
+        identified_moments_raw = self.identify_moments(transcript_segments)
+
+        cleaned_json_string = identified_moments_raw.strip()
+        if cleaned_json_string.startswith("```json"): 
+            cleaned_json_string = cleaned_json_string[len("```json"):].strip()
+        if cleaned_json_string.endswith("```"): 
+            cleaned_json_string = cleaned_json_string[:-len("```")].strip()
+
+        clip_moments = json.loads(cleaned_json_string)
+        if not clip_moments or not isinstance(clip_moments, list): 
+            print("Error identifying moments as a list")
+            clip_moments = []
+
+        print(clip_moments)
+
+        # processing clip moments
+        # for index, moment in enumerate(clip_moments[:3]): 
+        #     if "start" in moment and "end" in moment: 
+        #         print("Processing clip " + str(index) + " from " + str(moment["start"]) + " to " + str(moment["end"]))
+
+        
+        # # cleaning up 
+        # if base_dir.exists(): 
+        #     print("Cleaning up temp directory after " + base_dir)
+        #     shutil.rmtree(base_dir, ignore_errors=True)
+
+# entrypoint        
 @app.local_entrypoint()
 def main(): 
     import requests 
