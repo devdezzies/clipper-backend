@@ -175,15 +175,15 @@ class PodcastClipper:
         print(clip_moments)
 
         # processing clip moments
-        # for index, moment in enumerate(clip_moments[:3]): 
-        #     if "start" in moment and "end" in moment: 
-        #         print("Processing clip " + str(index) + " from " + str(moment["start"]) + " to " + str(moment["end"]))
+        for index, moment in enumerate(clip_moments[:3]): 
+            if "start" in moment and "end" in moment: 
+                print("Processing clip " + str(index) + " from " + str(moment["start"]) + " to " + str(moment["end"]))
 
         
-        # # cleaning up 
-        # if base_dir.exists(): 
-        #     print("Cleaning up temp directory after " + base_dir)
-        #     shutil.rmtree(base_dir, ignore_errors=True)
+        # cleaning up 
+        if base_dir.exists(): 
+            print("Cleaning up temp directory after " + base_dir)
+            shutil.rmtree(base_dir, ignore_errors=True)
 
 # entrypoint        
 @app.local_entrypoint()
