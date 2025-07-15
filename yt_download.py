@@ -9,3 +9,5 @@ print(f'Video title {yt.title}')
 
 ys = yt.streams.get_highest_resolution()
 ys.download()
+
+# ffmpeg -ss 00:15:00 -to 00:30:00 -i obrolan.mp4 -c copy obrolan15min.mp4
