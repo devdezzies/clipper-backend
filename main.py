@@ -428,7 +428,7 @@ class PodcastClipper:
         print(clip_moments)
 
         # processing clip moments
-        for index, moment in enumerate(clip_moments[:3]): 
+        for index, moment in enumerate(clip_moments[:1]): 
             if "start" in moment and "end" in moment: 
                 print("Processing clip " + str(index) + " from " + str(moment["start"]) + " to " + str(moment["end"]))
                 original_remote_path = pathlib.Path(request.video_path)
@@ -450,7 +450,7 @@ def main():
     url = podcast_clipper.process_video.web_url
 
     payload = {
-        "video_path": "test2/obrolan15min.mp4"
+        "video_path": "test2/maudy15min.mp4"
     }
 
     headers = {
